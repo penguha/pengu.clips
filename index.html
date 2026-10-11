@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FTHR Clips</title>
+<meta name="description" content="FTHR clip vault. Watch and share gameplay clips.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;900&family=Barlow:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="mast">
+    <a class="brand" href="./" aria-label="FTHR Clips home">
+      <svg viewBox="0 0 40 40" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M34 6C20 6 9 14 7 30l-2 5"/><path d="M34 6c-3 9-9 15-19 18"/><path d="M26 11c-2 6-6 10-12 12"/><path d="M7 30l8-3"/></svg>
+      <div><h1>FTHR</h1><p>Clip vault</p></div>
+    </a>
+    <div class="right">
+      <span class="count" id="count"></span>
+      <a class="btn" href="upload.html">Upload</a>
+    </div>
+  </header>
+
+  <nav class="chips" id="chips" aria-label="Filter by tag"></nav>
+  <main id="main"></main>
+
+  <footer><span>FTHR Clips</span></footer>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+  var clips = [], tagFilter = 'all';
+
+  function el(tag, cls, text) { var n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
+  function fmtDur(s) { if (!isFinite(s) || !s) return ''; s = Math.round(s); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
+  function fmtDate(iso) { try { return new Date(iso).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }); } catch (e) { return ''; } }
+
+  function copyText(text, input, done) {
+    function fallback() { input.hidden = false; input.focus(); input.select(); try { document.execCommand('copy'); } catch (e) { /* user can copy manually */ } done(); }
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback); else fallback();
+  }
+
+  function clipCard(c, feature) {
+    var card = el('article', 'card' + (feature ? ' feature' : ''));
+    var a = el('a', 'thumb'); a.href = '?c=' + encodeURIComponent(c.id); a.setAttribute('aria-label', 'Watch ' + c.title);
+    var v = document.createElement('video'); v.muted = true; v.preload = 'metadata'; v.setAttribute('playsinline', ''); v.src = 'clips/' + encodeURIComponent(c.file) + '#t=0.1'; a.appendChild(v);
+    var p = el('span', 'play'); p.appendChild(document.createElement('i')); a.appendChild(p);
+    if (c.dur) a.appendChild(el('span', 'dur', fmtDur(c.dur)));
+    card.appendChild(a);
+    var m = el('div', 'meta'), h = el('h2'), t = el('a', null, c.title); t.href = a.href; h.appendChild(t); m.appendChild(h);
+    var r = el('div', 'row'); r.appendChild(el('span', 'tag', c.tag || 'Clip')); r.appendChild(el('span', null, fmtDate(c.date))); m.appendChild(r);
+    card.appendChild(m); return card;
+  }
+
+  function renderList() {
+    $('count').textContent = clips.length + (clips.length === 1 ? ' clip' : ' clips');
+    var tags = []; clips.forEach(function (c) { if (c.tag && tags.indexOf(c.tag) < 0) tags.push(c.tag); });
+    if (tagFilter !== 'all' && tags.indexOf(tagFilter) < 0) tagFilter = 'all';
+    var chips = $('chips'); chips.innerHTML = '';
+    if (tags.length) ['all'].concat(tags).forEach(function (t) {
+      var b = el('button', 'chip', t === 'all' ? 'All' : t); b.type = 'button'; b.setAttribute('aria-pressed', String(t === tagFilter));
+      b.onclick = function () { tagFilter = t; renderList(); }; chips.appendChild(b);
+    });
+    var main = $('main'); main.innerHTML = '';
+    var list = clips.filter(function (c) { return tagFilter === 'all' || c.tag === tagFilter; });
+    if (!list.length) {
+      var e = el('div', 'empty'); e.appendChild(el('h2', null, clips.length ? 'Nothing under this tag' : 'No clips yet'));
+      e.appendChild(el('p', null, clips.length ? 'Pick another tag above.' : 'Press Upload to add the first clip.')); main.appendChild(e); return;
+    }
+    var grid = el('div', 'grid'); list.forEach(function (c, i) { grid.appendChild(clipCard(c, i === 0 && tagFilter === 'all')); }); main.appendChild(grid);
+  }
+
+  function renderWatch(id) {
+    $('chips').innerHTML = ''; $('count').textContent = '';
+    var main = $('main'); main.innerHTML = '';
+    var c = clips.filter(function (x) { return x.id === id; })[0];
+    if (!c) {
+      var e = el('div', 'empty'); e.appendChild(el('h2', null, 'Clip not found'));
+      e.appendChild(el('p', null, 'If it was just uploaded, the site needs about a minute to publish it. Reload in a moment.'));
+      var back = el('a', 'btn ghost', 'All clips'); back.href = './'; e.appendChild(back); main.appendChild(e); return;
+    }
+    document.title = c.title + ' | FTHR Clips';
+    var w = el('section', 'watch'), v = document.createElement('video');
+    v.controls = true; v.preload = 'metadata'; v.setAttribute('playsinline', ''); v.src = 'clips/' + encodeURIComponent(c.file); w.appendChild(v);
+    w.appendChild(el('h2', null, c.title));
+    var sub = el('div', 'sub'); if (c.tag) sub.appendChild(el('span', 'tag', c.tag)); sub.appendChild(el('span', null, fmtDate(c.date)));
+    if (c.dur) sub.appendChild(el('span', null, fmtDur(c.dur))); w.appendChild(sub);
+    var acts = el('div', 'actions');
+    var share = el('button', 'btn', 'Copy link'), inp = el('input'); inp.type = 'text'; inp.value = location.href; inp.hidden = true; inp.setAttribute('aria-label', 'Clip link');
+    share.type = 'button'; share.onclick = function () { copyText(location.href, inp, function () { share.textContent = 'Copied'; setTimeout(function () { share.textContent = 'Copy link'; }, 1600); }); };
+    var dl = el('a', 'btn ghost', 'Open video file'); dl.href = v.src;
+    var all = el('a', 'btn ghost', 'All clips'); all.href = './';
+    acts.appendChild(share); acts.appendChild(inp); acts.appendChild(dl); acts.appendChild(all); w.appendChild(acts); main.appendChild(w);
+  }
+
+  function route() {
+    var id = new URLSearchParams(location.search).get('c');
+    if (id) renderWatch(id); else renderList();
+  }
+
+  async function loadClips() {
+    try {
+      var res = await fetch('clips.json?t=' + Date.now(), { cache: 'no-store' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      var d = await res.json(); clips = Array.isArray(d) ? d : [];
+    } catch (e) {
+      var main = $('main'); main.innerHTML = '';
+      var box = el('div', 'empty'); box.appendChild(el('h2', null, 'Could not load clips'));
+      box.appendChild(el('p', null, location.protocol === 'file:' ? 'Open this page through your live site or a local web server. Browsers block loading clips.json from a file:// address.' : 'clips.json is missing or unreadable. Check the repository.'));
+      main.appendChild(box); return false;
+    }
+    return true;
+  }
+
+  loadClips().then(function (ok) { if (ok) route(); });
+})();
+</script>
+</body>
+</html>

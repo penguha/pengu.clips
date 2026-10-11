@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Upload | FTHR Clips</title>
+<meta name="robots" content="noindex">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;900&family=Barlow:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap narrow">
+  <header class="mast">
+    <a class="brand" href="./" aria-label="FTHR Clips home">
+      <svg viewBox="0 0 40 40" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M34 6C20 6 9 14 7 30l-2 5"/><path d="M34 6c-3 9-9 15-19 18"/><path d="M26 11c-2 6-6 10-12 12"/><path d="M7 30l8-3"/></svg>
+      <div><h1>FTHR</h1><p>Upload a clip</p></div>
+    </a>
+    <div class="right"><a class="btn ghost" href="./">All clips</a></div>
+  </header>
+
+  <section class="panel">
+    <h2 id="panel-title">Upload a clip</h2>
+    <p class="hint" id="panel-hint">Pick a video and press upload. You get a link to share with friends.</p>
+
+    <form class="form" id="setup" autocomplete="off" hidden>
+      <label>GitHub username <input type="text" id="s-owner" placeholder="your-username" spellcheck="false"></label>
+      <label>Repository name <input type="text" id="s-repo" placeholder="clip" spellcheck="false"></label>
+      <label class="full">Access token (fine-grained, this repo only, Contents: read and write)
+        <input type="password" id="s-token" placeholder="github_pat_..." spellcheck="false">
+      </label>
+      <div class="full"><button class="btn" id="s-save" type="submit">Save and check connection</button></div>
+    </form>
+
+    <form class="form" id="upform" autocomplete="off" hidden>
+      <label class="full"><span id="file-label">Video file</span>
+        <input type="file" id="u-file" accept="video/*">
+      </label>
+      <label>Title <input type="text" id="u-title" maxlength="80" placeholder="1v4 clutch on Ascent"></label>
+      <label>Tag <input type="text" id="u-tag" maxlength="24" placeholder="Valorant"></label>
+      <div><button class="btn" id="u-go" type="submit">Upload and get link</button></div>
+    </form>
+
+    <p class="status" id="status" role="status"></p>
+    <div class="result" id="result" hidden></div>
+    <p class="note" id="who" hidden></p>
+  </section>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // <core> Upload helpers. Kept free of DOM access so they can be tested on their own.
+  var API = 'https://api.github.com';
+  var MAX_BYTES_TOKEN = 50 * 1024 * 1024;
+  var MAX_BYTES_HELPER = 25 * 1024 * 1024;
+
+  function encodePath(p) { return p.split('/').map(encodeURIComponent).join('/'); }
+  function utf8ToB64(str) {
+    var bytes = new TextEncoder().encode(str), bin = '', i, CH = 0x8000;
+    for (i = 0; i < bytes.length; i += CH) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+    return btoa(bin);
+  }
+  function b64ToUtf8(b64) {
+    var bin = atob(String(b64).replace(/\s/g, '')), bytes = new Uint8Array(bin.length), i;
+    for (i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new TextDecoder().decode(bytes);
+  }
+  function ghError(res, body) {
+    var msg = (body && body.message) || ('HTTP ' + res.status);
+    var e = new Error(res.status === 401 ? 'GitHub rejected the token. Check that it is correct and has not expired.' :
+      res.status === 403 ? 'GitHub refused the request (' + msg + '). The token may lack Contents: read and write on this repo.' :
+      res.status === 404 ? 'Repository or file not found. Check the username, repository name and token access.' : msg);
+    e.status = res.status; return e;
+  }
+  async function gh(cfg, method, path, body) {
+    var res = await fetch(API + path, {
+      method: method,
+      headers: { 'Accept': 'application/vnd.github+json', 'Authorization': 'Bearer ' + cfg.token, 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined
+    });
+    var data = null; try { data = await res.json(); } catch (e) { data = null; }
+    if (!res.ok) throw ghError(res, data);
+    return data;
+  }
+  function repoPath(cfg) { return '/repos/' + encodeURIComponent(cfg.owner) + '/' + encodeURIComponent(cfg.repo); }
+  async function repoInfo(cfg) {
+    var d = await gh(cfg, 'GET', repoPath(cfg));
+    return { branch: d.default_branch, canPush: !!(d.permissions && d.permissions.push) };
+  }
+  async function getFile(cfg, path) {
+    try {
+      var d = await gh(cfg, 'GET', repoPath(cfg) + '/contents/' + encodePath(path) + '?ref=' + encodeURIComponent(cfg.branch));
+      return { sha: d.sha, text: b64ToUtf8(d.content || '') };
+    } catch (e) { if (e.status === 404) return null; throw e; }
+  }
+  async function putFile(cfg, path, b64, message, sha) {
+    var body = { message: message, content: b64, branch: cfg.branch };
+    if (sha) body.sha = sha;
+    return gh(cfg, 'PUT', repoPath(cfg) + '/contents/' + encodePath(path), body);
+  }
+  async function updateManifest(cfg, mutate, message) {
+    var attempt, last;
+    for (attempt = 0; attempt < 3; attempt++) {
+      var f = await getFile(cfg, 'clips.json'), list = [];
+      if (f) { try { list = JSON.parse(f.text); } catch (e) { throw new Error('clips.json in the repo is not valid JSON. Fix or delete it, then try again.'); } }
+      if (!Array.isArray(list)) throw new Error('clips.json in the repo must be a list.');
+      list = mutate(list.slice());
+      try {
+        await putFile(cfg, 'clips.json', utf8ToB64(JSON.stringify(list, null, 2) + '\n'), message, f ? f.sha : undefined);
+        return list;
+      } catch (e) { last = e; if (e.status !== 409 && e.status !== 422) throw e; }
+    }
+    throw last;
+  }
+  function newId() {
+    var a = new Uint8Array(5), s = '', i;
+    (self.crypto || window.crypto).getRandomValues(a);
+    for (i = 0; i < a.length; i++) s += a[i].toString(36).padStart(2, '0').slice(-2);
+    return s.slice(0, 8);
+  }
+  function safeExt(name) {
+    var m = /\.([A-Za-z0-9]{2,5})$/.exec(name || ''), e = m ? m[1].toLowerCase() : '';
+    return ['mp4', 'webm', 'mov', 'm4v', 'ogv'].indexOf(e) >= 0 ? e : 'mp4';
+  }
+  // Mode 1: upload straight to GitHub with the owner's token.
+  async function uploadWithToken(cfg, b64, ext, meta) {
+    var id = newId(), file = id + '.' + ext;
+    await putFile(cfg, 'clips/' + file, b64, 'Add clip ' + id);
+    var entry = { id: id, title: meta.title, tag: meta.tag, file: file, date: new Date().toISOString(), size: meta.size, dur: meta.dur };
+    try { await updateManifest(cfg, function (l) { l.unshift(entry); return l; }, 'List clip ' + id); }
+    catch (e) { e.uploadedFile = file; throw e; }
+    return { id: id, file: file };
+  }
+  // Mode 2: send to the upload helper (Cloudflare Worker), no login needed.
+  async function uploadWithHelper(endpoint, b64, ext, meta) {
+    var res;
+    try {
+      res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain', 'X-Title': encodeURIComponent(meta.title), 'X-Tag': encodeURIComponent(meta.tag), 'X-Ext': ext, 'X-Size': String(meta.size), 'X-Dur': String(meta.dur) },
+        body: b64
+      });
+    } catch (e) { throw new Error('Could not reach the upload helper. Check your connection, and that the helper address in config.json is correct.'); }
+    var data = null; try { data = await res.json(); } catch (e) { data = null; }
+    if (!res.ok || !data || !data.id) {
+      var err = new Error((data && data.error) || 'The upload helper returned an error (' + res.status + ').');
+      if (data && data.file) err.uploadedFile = data.file;
+      throw err;
+    }
+    return { id: data.id, file: data.file };
+  }
+  // </core>
+
+  if (typeof document === 'undefined') { self.__core = { uploadWithToken: uploadWithToken, uploadWithHelper: uploadWithHelper, repoInfo: repoInfo, utf8ToB64: utf8ToB64, b64ToUtf8: b64ToUtf8, safeExt: safeExt, newId: newId }; return; }
+
+  // ---------- page ----------
+  var $ = function (id) { return document.getElementById(id); };
+  var LS = 'fthr.github';
+  var cfg = null, endpoint = '', busy = false;
+
+  function el(tag, cls, text) { var n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
+  function fmtMB(b) { return (b / 1048576).toFixed(1) + ' MB'; }
+  function setStatus(msg, kind) { var s = $('status'); s.textContent = msg || ''; s.className = 'status' + (kind ? ' ' + kind : ''); }
+
+  function loadCfg() { try { var c = JSON.parse(localStorage.getItem(LS) || 'null'); return c && c.owner && c.repo && c.token ? c : null; } catch (e) { return null; } }
+  function storeCfg(c) { try { localStorage.setItem(LS, JSON.stringify(c)); } catch (e) { /* token stays in memory for this visit */ } }
+  function forgetCfg() { try { localStorage.removeItem(LS); } catch (e) { /* ignore */ } }
+
+  function detect() {
+    var h = location.hostname;
+    if (/\.github\.io$/i.test(h)) {
+      var seg = location.pathname.split('/').filter(Boolean)[0];
+      return { owner: h.split('.')[0], repo: seg && seg !== 'upload' && !/\.html?$/i.test(seg) ? seg : h };
+    }
+    return { owner: '', repo: '' };
+  }
+  function siteBase() {
+    var local = !/^https?:$/.test(location.protocol) || /^(localhost|127\.|\[::1\])/.test(location.hostname);
+    if (!local) return location.origin + location.pathname.replace(/[^/]*$/, '');
+    if (cfg) { var o = cfg.owner, r = cfg.repo; return r.toLowerCase() === (o + '.github.io').toLowerCase() ? 'https://' + o + '.github.io/' : 'https://' + o + '.github.io/' + r + '/'; }
+    return location.origin + location.pathname.replace(/[^/]*$/, '');
+  }
+
+  function copyText(text, input, done) {
+    function fallback() { input.focus(); input.select(); try { document.execCommand('copy'); } catch (e) { /* user can copy manually */ } done(); }
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback); else fallback();
+  }
+  function linkRow(label, url) {
+    var r = el('div', 'linkrow'), l = el('label', null, label), i = el('input'), b = el('button', 'btn ghost', 'Copy');
+    i.type = 'text'; i.readOnly = true; i.value = url; i.setAttribute('aria-label', label); b.type = 'button';
+    i.addEventListener('focus', function () { i.select(); });
+    b.onclick = function () { copyText(url, i, function () { b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1600); }); };
+    r.appendChild(l); r.appendChild(i); r.appendChild(b); return r;
+  }
+
+  function maxBytes() { return endpoint ? MAX_BYTES_HELPER : MAX_BYTES_TOKEN; }
+  function showMode() {
+    var ready = !!endpoint || !!cfg;
+    $('setup').hidden = ready; $('upform').hidden = !ready;
+    $('file-label').textContent = 'Video file (MP4 works best, up to ' + Math.round(maxBytes() / 1048576) + ' MB)';
+    $('panel-title').textContent = ready ? 'Upload a clip' : 'Connect your GitHub repo';
+    $('panel-hint').textContent = ready ? 'Pick a video and press upload. You get a link to share with friends.' : 'One-time setup. The token is kept only in this browser. To skip this step for everyone, set up the upload helper (see the README).';
+    var who = $('who'); who.hidden = !(cfg && !endpoint); who.innerHTML = '';
+    if (cfg && !endpoint) { who.textContent = 'Connected to ' + cfg.owner + '/' + cfg.repo + ' (' + cfg.branch + '). '; var b = el('button', 'rm', 'Disconnect'); b.type = 'button'; b.onclick = function () { forgetCfg(); cfg = null; $('result').hidden = true; setStatus(''); showMode(); }; who.appendChild(b); }
+  }
+
+  $('setup').addEventListener('submit', async function (e) {
+    e.preventDefault(); if (busy) return;
+    var c = { owner: $('s-owner').value.trim(), repo: $('s-repo').value.trim().replace(/\.git$/, ''), token: $('s-token').value.trim() };
+    if (!c.owner || !c.repo || !c.token) { setStatus('Fill in the username, repository and token.', 'err'); return; }
+    busy = true; $('s-save').disabled = true; setStatus('Checking connection…');
+    try {
+      var info = await repoInfo(c);
+      if (!info.canPush) throw new Error('This token can read the repo but not write to it. Give it Contents: read and write.');
+      c.branch = info.branch; storeCfg(c); cfg = c; $('s-token').value = ''; setStatus('Connected.', 'ok'); showMode();
+    } catch (err) { setStatus(err.message || 'Could not connect.', 'err'); }
+    busy = false; $('s-save').disabled = false;
+  });
+
+  function readB64(file) {
+    return new Promise(function (res, rej) {
+      var r = new FileReader();
+      r.onload = function () { var s = String(r.result), i = s.indexOf(','); res(s.slice(i + 1)); };
+      r.onerror = function () { rej(new Error('Could not read that file.')); };
+      r.readAsDataURL(file);
+    });
+  }
+  function readDur(file) {
+    return new Promise(function (res) {
+      var url = URL.createObjectURL(file), v = document.createElement('video'), done = false;
+      function fin(d) { if (done) return; done = true; URL.revokeObjectURL(url); res(isFinite(d) ? Math.round(d) : 0); }
+      v.preload = 'metadata'; v.onloadedmetadata = function () { fin(v.duration); }; v.onerror = function () { fin(0); };
+      setTimeout(function () { fin(0); }, 5000); v.src = url;
+    });
+  }
+
+  $('upform').addEventListener('submit', async function (e) {
+    e.preventDefault(); if (busy) return;
+    var file = $('u-file').files[0];
+    if (!file) { setStatus('Choose a video file first.', 'err'); return; }
+    if (file.type && file.type.indexOf('video/') !== 0) { setStatus('That is not a video file.', 'err'); return; }
+    if (file.size > maxBytes()) { setStatus('That file is ' + fmtMB(file.size) + '. The limit is ' + Math.round(maxBytes() / 1048576) + ' MB. Trim or compress it first.', 'err'); return; }
+    busy = true; $('u-go').disabled = true; $('result').hidden = true;
+    try {
+      setStatus('Uploading ' + fmtMB(file.size) + '… keep this tab open.');
+      var b64 = await readB64(file), dur = await readDur(file);
+      var meta = { title: $('u-title').value.trim() || file.name.replace(/\.[^.]+$/, ''), tag: $('u-tag').value.trim(), size: file.size, dur: dur };
+      var ext = safeExt(file.name);
+      var out = endpoint ? await uploadWithHelper(endpoint, b64, ext, meta) : await uploadWithToken(cfg, b64, ext, meta);
+      var base = siteBase(), r = $('result'); r.innerHTML = '';
+      r.appendChild(el('h3', null, 'Your clip is uploaded'));
+      r.appendChild(linkRow('Share this link with friends', base + '?c=' + out.id));
+      r.appendChild(linkRow('Direct video link (works for Discord embeds)', base + 'clips/' + out.file));
+      r.appendChild(el('p', 'note', 'The site needs about a minute to publish new clips. If a friend sees "not found" right away, ask them to reload shortly.'));
+      r.hidden = false; setStatus('Done.', 'ok'); $('upform').reset();
+    } catch (err) {
+      if (err.uploadedFile) setStatus('The video was saved as clips/' + err.uploadedFile + ' but could not be added to the list (' + err.message + '). Its direct link will still work once the site publishes.', 'err');
+      else setStatus(err.message || 'Upload failed.', 'err');
+    }
+    busy = false; $('u-go').disabled = false;
+  });
+
+  // ---------- start ----------
+  cfg = loadCfg();
+  if (cfg && !cfg.branch) cfg.branch = 'main';
+  var d = detect(); $('s-owner').value = d.owner; $('s-repo').value = d.repo;
+  fetch('config.json?t=' + Date.now(), { cache: 'no-store' })
+    .then(function (r) { return r.ok ? r.json() : {}; })
+    .then(function (c) { var u = c && typeof c.uploadEndpoint === 'string' ? c.uploadEndpoint.trim() : ''; if (/^https:\/\//i.test(u)) endpoint = u; })
+    .catch(function () { /* no helper configured: token mode */ })
+    .then(showMode);
+})();
+</script>
+</body>
+</html>
